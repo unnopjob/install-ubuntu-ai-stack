@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODEL="${OLLAMA_MODEL:-gemma2:9b}"
 FLOWISE_PORT="${FLOWISE_PORT:-3000}"
-NODE_MAJOR="${NODE_MAJOR:-24}"
+NODE_MAJOR="${NODE_MAJOR:-22}"
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
 SWAP_SIZE_GB="${SWAP_SIZE_GB:-8}"
 ENABLE_PM2_LOGROTATE="${ENABLE_PM2_LOGROTATE:-1}"
@@ -15,6 +15,7 @@ SPINNER_ENABLED="${SPINNER_ENABLED:-1}"
 ACTION="install"
 SCRIPT_PATH=""
 INSTALLER_URL="${INSTALLER_URL:-https://raw.githubusercontent.com/unnopjob/install-ubuntu-ai-stack/main/install.sh}"
+LINUX_FAMILY=""
 SUDO_KEEPALIVE_PID=""
 INSTALL_PROGRESS_TOTAL=0
 INSTALL_PROGRESS_STEP=0
@@ -98,16 +99,57 @@ run_with_spinner() {
 }
 
 detect_script_path() {
-  local candidate
-
   SCRIPT_PATH=""
 
-  for candidate in "${BASH_SOURCE[0]:-}" "$0"; do
-    if [[ -n "$candidate" && -f "$candidate" ]]; then
-      SCRIPT_PATH="$(readlink -f "$candidate")"
+  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+    SCRIPT_PATH="$script_dir/$(basename "${BASH_SOURCE[0]}")"
+  fi
+}
+
+detect_platform() {
+  [[ "$(uname -s)" == "Linux" ]] || die "This installer supports Ubuntu/Debian and Fedora/RedHat-family Linux only."
+
+  [[ -f /etc/os-release ]] || die "Linux detected, but /etc/os-release is missing."
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  case " ${ID:-} ${ID_LIKE:-} " in
+    *" debian "*|*" ubuntu "*) LINUX_FAMILY="debian" ;;
+    *" fedora "*|*" rhel "*|*" centos "*|*" rocky "*|*" almalinux "*|*" ol "*|*" amzn "*)
+      LINUX_FAMILY="rpm"
+      ;;
+    *)
+      die "Unsupported Linux distribution: ${ID:-unknown} (${ID_LIKE:-unknown})."
+      ;;
+  esac
+}
+
+port_listening() {
+  local port="$1"
+
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltn 2>/dev/null | awk -v port=":${port}" 'NR > 1 && $4 ~ port "$" { found = 1 } END { exit !found }'; then
       return 0
     fi
-  done
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+  fi
+
+  return 1
+}
+
+open_url() {
+  local url="$1"
+
+  if command -v xdg-open >/dev/null 2>&1 && { [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; }; then
+    xdg-open "$url" >/dev/null 2>&1 &
+    return 0
+  fi
+
+  printf 'Open this URL: %s\n' "$url"
 }
 
 installer_invocation() {
@@ -176,18 +218,8 @@ cleanup() {
   fi
 }
 
-require_linux() {
-  [[ -f /etc/os-release ]] || die "This script requires Linux."
-  # shellcheck disable=SC1091
-  . /etc/os-release
-
-  if [[ "${ID:-}" != "ubuntu" && "${ID_LIKE:-}" != *"debian"* ]]; then
-    warn "This script is tuned for Ubuntu/Debian. Detected: ${ID:-unknown}"
-  fi
-}
-
-require_systemd() {
-  command -v systemctl >/dev/null 2>&1 || die "systemd/systemctl is required."
+require_service_manager() {
+  command -v systemctl >/dev/null 2>&1 || die "systemd/systemctl is required on Linux."
 }
 
 require_non_root() {
@@ -261,7 +293,7 @@ check_preflight() {
   local free_disk_gb
   local total_ram_gb
 
-  need_cmds curl sudo awk grep sed df mktemp timeout
+  need_cmds curl sudo awk grep sed df mktemp
 
   if ! curl -fsI --max-time 10 https://ollama.com >/dev/null 2>&1; then
     warn "Could not reach ollama.com right now. The install may still work if the network issue is temporary."
@@ -271,12 +303,13 @@ check_preflight() {
     warn "Could not reach the npm registry right now."
   fi
 
-  free_disk_gb="$(df -BG / | awk 'NR==2 {gsub(/G/, "", $4); print $4 + 0}')"
+  free_disk_gb="$(df -Pk / | awk 'NR==2 {print int($4 / 1024 / 1024)}')"
   if (( free_disk_gb < MIN_FREE_DISK_GB )); then
     die "Only ${free_disk_gb}G free on /; please free up space before installing."
   fi
 
   total_ram_gb="$(awk '/MemTotal:/ {print int($2 / 1024 / 1024)}' /proc/meminfo)"
+
   if (( total_ram_gb < MIN_RAM_GB_WARN )); then
     warn "Only ${total_ram_gb}G RAM detected. gemma2:9b may need swap or may run slowly."
   fi
@@ -287,24 +320,45 @@ check_preflight() {
     warn "No nvidia-smi detected. This stack will run in CPU mode unless GPU drivers are already installed."
   fi
 
-  if command -v ss >/dev/null 2>&1; then
-    if ss -ltn 2>/dev/null | grep -qE ":(11434|${FLOWISE_PORT})[[:space:]]"; then
-      warn "Port 11434 or ${FLOWISE_PORT} is already listening. The install may collide with an existing service."
-    fi
+  if port_listening 11434 || port_listening "$FLOWISE_PORT"; then
+    warn "Port 11434 or ${FLOWISE_PORT} is already listening. The install may collide with an existing service."
   fi
 }
 
 install_prereqs() {
-  run_with_spinner "Updating apt metadata" sudo apt-get update
-  run_with_spinner "Installing prerequisites" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential \
-    ca-certificates \
-    curl \
-    gnupg \
-    iproute2 \
-    lsb-release \
-    xdg-utils \
-    zstd
+  if [[ "$LINUX_FAMILY" == "debian" ]]; then
+    run_with_spinner "Updating apt metadata" sudo apt-get update
+    run_with_spinner "Installing prerequisites" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      build-essential \
+      ca-certificates \
+      curl \
+      gnupg \
+      iproute2 \
+      lsb-release \
+      python3 \
+      xdg-utils \
+      zstd
+  else
+    local pkg_mgr
+
+    if command -v dnf >/dev/null 2>&1; then
+      pkg_mgr="dnf"
+    else
+      pkg_mgr="yum"
+    fi
+
+    run_with_spinner "Refreshing package metadata" sudo "$pkg_mgr" makecache --refresh
+    run_with_spinner "Installing prerequisites" sudo "$pkg_mgr" install -y \
+      ca-certificates \
+      curl \
+      gnupg2 \
+      gcc-c++ \
+      make \
+      iproute \
+      python3 \
+      xdg-utils \
+      zstd
+  fi
 }
 
 maybe_setup_swap() {
@@ -393,7 +447,7 @@ run_ollama_smoke_test() {
   response_file="$(mktemp)"
   log "Running an Ollama API smoke test for ${MODEL}..."
 
-  if timeout 180s curl -fsS "http://127.0.0.1:11434/api/generate" \
+  if curl -fsS --max-time 180 "http://127.0.0.1:11434/api/generate" \
     -H 'Content-Type: application/json' \
     -d "{\"model\":\"${MODEL}\",\"prompt\":\"Reply with exactly OK.\",\"stream\":false}" \
     >"$response_file"; then
@@ -410,19 +464,30 @@ run_ollama_smoke_test() {
 }
 
 install_node_and_global_tools() {
-  run_with_spinner "Adding NodeSource repository for Node.js ${NODE_MAJOR}.x" bash -lc "curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -"
+  if [[ "$LINUX_FAMILY" == "debian" ]]; then
+    run_with_spinner "Adding NodeSource repository for Node.js ${NODE_MAJOR}.x" bash -lc "curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -"
+    run_with_spinner "Installing Node.js" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+  else
+    run_with_spinner "Adding NodeSource repository for Node.js ${NODE_MAJOR}.x" bash -lc "curl -fsSL https://rpm.nodesource.com/setup_${NODE_MAJOR}.x | sudo bash -"
+    if command -v dnf >/dev/null 2>&1; then
+      run_with_spinner "Installing Node.js" sudo dnf install -y nodejs
+    else
+      run_with_spinner "Installing Node.js" sudo yum install -y nodejs
+    fi
+  fi
 
-  run_with_spinner "Installing Node.js" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-
-  export PATH="/usr/local/bin:/usr/bin:$PATH"
+  export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
   hash -r
+
+  command -v node >/dev/null 2>&1 || die "node was not found in PATH after installation."
+  command -v npm >/dev/null 2>&1 || die "npm was not found in PATH after installation."
 
   log "Node version: $(node -v)"
   log "npm version: $(npm -v)"
 
   run_with_spinner "Installing Flowise and PM2 globally" sudo npm install -g --unsafe-perm flowise pm2
 
-  export PATH="/usr/local/bin:/usr/bin:$PATH"
+  export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
   hash -r
 
   command -v flowise >/dev/null 2>&1 || die "flowise was not found in PATH after installation."
@@ -433,6 +498,7 @@ configure_flowise_pm2() {
   local flowise_bin
   local pm2_bin
   local node_bin_dir
+  local -a startup_cmd
 
   flowise_bin="$(command -v flowise)"
   pm2_bin="$(command -v pm2)"
@@ -447,7 +513,9 @@ configure_flowise_pm2() {
   run_with_spinner "Saving the PM2 process list" "$pm2_bin" save
 
   log "Registering the PM2 startup hook for user ${USER}..."
-  sudo env PATH="$PATH:$node_bin_dir" "$pm2_bin" startup systemd -u "$USER" --hp "$HOME" || warn "PM2 startup hook returned a non-zero status; review the output above."
+  startup_cmd=(sudo env PATH="$PATH:$node_bin_dir" "$pm2_bin" startup systemd -u "$USER" --hp "$HOME")
+
+  run_with_spinner "Registering the PM2 startup hook" "${startup_cmd[@]}" || warn "PM2 startup hook returned a non-zero status; review the output above."
 
   run_with_spinner "Saving the PM2 process list again" "$pm2_bin" save
 }
@@ -480,14 +548,11 @@ create_gui_launchers() {
   fi
 
   bin_dir="$HOME/.local/bin"
-  app_dir="$HOME/.local/share/applications"
   desktop_dir="$HOME/Desktop"
   open_launcher="$bin_dir/open-flowise"
   install_launcher="$bin_dir/install-ai-stack"
-  flowise_desktop="$app_dir/Flowise.desktop"
-  install_desktop="$app_dir/Install Ubuntu AI Stack.desktop"
 
-  mkdir -p "$bin_dir" "$app_dir"
+  mkdir -p "$bin_dir"
 
   cat >"$open_launcher" <<EOF
 #!/usr/bin/env bash
@@ -520,6 +585,7 @@ EOF
 set -euo pipefail
 
 INSTALLER_URL="$INSTALLER_URL"
+SCRIPT_PATH="$SCRIPT_PATH"
 if [[ -n "$SCRIPT_PATH" ]]; then
   exec "$SCRIPT_PATH" "\$@"
 fi
@@ -528,6 +594,11 @@ export INSTALLER_URL
 exec bash -c 'curl -fsSL "$INSTALLER_URL" | bash -s -- "$@"' bash "\$@"
 EOF
   chmod 755 "$install_launcher"
+
+  app_dir="$HOME/.local/share/applications"
+  flowise_desktop="$app_dir/Flowise.desktop"
+  install_desktop="$app_dir/Install AI Stack.desktop"
+  mkdir -p "$app_dir"
 
   cat >"$flowise_desktop" <<EOF
 [Desktop Entry]
@@ -544,7 +615,7 @@ EOF
   cat >"$install_desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Install Ubuntu AI Stack
+Name=Install AI Stack
 Comment=Run the AI stack installer
 Exec=$install_launcher
 Terminal=true
@@ -556,10 +627,9 @@ EOF
   if [[ -d "$desktop_dir" ]]; then
     cp -f "$flowise_desktop" "$desktop_dir/Flowise.desktop" 2>/dev/null || true
     chmod 755 "$desktop_dir/Flowise.desktop" 2>/dev/null || true
-    cp -f "$install_desktop" "$desktop_dir/Install Ubuntu AI Stack.desktop" 2>/dev/null || true
-    chmod 755 "$desktop_dir/Install Ubuntu AI Stack.desktop" 2>/dev/null || true
+    cp -f "$install_desktop" "$desktop_dir/Install AI Stack.desktop" 2>/dev/null || true
+    chmod 755 "$desktop_dir/Install AI Stack.desktop" 2>/dev/null || true
   fi
-
   log "GUI launchers installed under ~/.local/share/applications and, if available, the Desktop."
 }
 
@@ -589,9 +659,10 @@ health_checks() {
 }
 
 status_report() {
-  require_linux
+  require_service_manager
 
   printf 'System: %s %s\n' "$(uname -s)" "$(uname -r)"
+  printf 'Linux distro: %s (%s)\n' "${LINUX_FAMILY:-unknown}" "${ID:-unknown}"
 
   if command -v node >/dev/null 2>&1; then
     printf 'Node: %s\n' "$(node -v)"
@@ -641,7 +712,7 @@ status_report() {
 open_flowise() {
   local url="http://127.0.0.1:${FLOWISE_PORT}"
 
-  require_linux
+  require_service_manager
   if http_ready "$url" 15; then
     :
   else
@@ -653,11 +724,7 @@ open_flowise() {
     fi
   fi
 
-  if command -v xdg-open >/dev/null 2>&1 && { [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; }; then
-    xdg-open "$url" >/dev/null 2>&1 &
-  else
-    printf 'Open this URL: %s\n' "$url"
-  fi
+  open_url "$url"
 }
 
 print_summary() {
@@ -667,13 +734,15 @@ print_summary() {
   printf '  PM2:     pm2 status\n'
   printf '  Status:   %s --status\n' "$(installer_invocation)"
   printf '  Open UI:  %s --open-flowise\n' "$(installer_invocation)"
+  printf '  Launchers: ~/.local/share/applications and Desktop\n'
 }
 
 main() {
   detect_script_path
   parse_args "$@"
+  detect_platform
 
-  require_linux
+  require_service_manager
 
   case "$ACTION" in
     status)
@@ -689,9 +758,8 @@ main() {
   esac
 
   require_non_root
-  require_systemd
 
-  log "Starting setup for Ollama + ${MODEL} + Node.js + Flowise + PM2..."
+  log "Starting setup for Ollama + ${MODEL} + Node.js + Flowise + PM2 on ${LINUX_FAMILY} Linux..."
   sudo -v
   ( while true; do sudo -n true; sleep 60; done ) &
   SUDO_KEEPALIVE_PID=$!

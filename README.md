@@ -1,15 +1,20 @@
-# Ubuntu AI Stack Installer
+# Linux AI Stack Installer
 
-`Ubuntu AI Stack Installer` is a Bash installer for Ubuntu that sets up:
+`Linux AI Stack Installer` is a Bash installer for Ubuntu/Debian and Fedora/RedHat-family Linux that sets up:
 
 - Ollama
 - `gemma2:9b`
 - Node.js
 - Flowise
-- PM2 startup for Flowise on boot/reboot
-- Optional swap file
+- PM2 startup for Flowise on boot/login
+- Optional swap file on Linux
 - Optional PM2 log rotation
-- Desktop and app-menu launchers for Flowise and the installer
+- Desktop or launcher shortcuts for Flowise and the installer
+
+## Supported Platforms
+
+- Ubuntu and Debian-based Linux
+- Fedora, RHEL, Rocky, AlmaLinux, and similar RedHat-family Linux
 
 ## Files
 
@@ -18,17 +23,24 @@
 
 ## Quick Start
 
-### Option 1: run from a local copy
+### Run from a local copy
 
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
 
-### Option 2: run directly from GitHub
+### Run directly from GitHub
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/unnopjob/install-ubuntu-ai-stack/main/install.sh | bash -s --
+```
+
+The direct GitHub form also supports arguments:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/unnopjob/install-ubuntu-ai-stack/main/install.sh | bash -s -- --status
+curl -fsSL https://raw.githubusercontent.com/unnopjob/install-ubuntu-ai-stack/main/install.sh | bash -s -- --open-flowise
 ```
 
 When you run it in a terminal, long steps show a live spinner automatically and the installer tags phases as `[1/8]`, `[2/8]`, and so on.
@@ -40,18 +52,12 @@ When you run it in a terminal, long steps show a live spinner automatically and 
 ./install.sh --open-flowise
 ```
 
-If you run from GitHub and want to pass a command, use the same `bash -s --` form:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/unnopjob/install-ubuntu-ai-stack/main/install.sh | bash -s -- --status
-```
-
 ## Optional Overrides
 
 You can tweak the install with environment variables:
 
 ```bash
-OLLAMA_MODEL=gemma2:9b FLOWISE_PORT=3000 NODE_MAJOR=24 ./install.sh
+OLLAMA_MODEL=gemma2:9b FLOWISE_PORT=3000 NODE_MAJOR=22 ./install.sh
 ```
 
 If you want to skip the short `gemma2:9b` smoke test after download:
@@ -60,13 +66,13 @@ If you want to skip the short `gemma2:9b` smoke test after download:
 RUN_MODEL_SMOKE_TEST=0 ./install.sh
 ```
 
-To enable swap creation and PM2 log rotation:
+To enable swap creation and PM2 log rotation on Linux:
 
 ```bash
 ENABLE_SWAP=1 SWAP_SIZE_GB=8 ENABLE_PM2_LOGROTATE=1 ./install.sh
 ```
 
-If you do not want the installer to create desktop and app-menu launchers:
+If you do not want the installer to create launcher shortcuts:
 
 ```bash
 CREATE_DESKTOP_LAUNCHER=0 ./install.sh
@@ -84,17 +90,21 @@ If you mirror the script somewhere else, override the raw URL:
 INSTALLER_URL=https://raw.githubusercontent.com/<user>/<repo>/main/install.sh ./install.sh
 ```
 
+## What the Installer Does
+
+- On Linux, it uses the distro package manager to install prerequisites, installs Node.js from NodeSource, starts Ollama with systemd, and registers PM2 startup
+- It pulls `gemma2:9b` by default after Ollama is ready
+- It creates local launchers so you can reopen Flowise or rerun the installer quickly
+
 ## After Install
 
 - Flowise opens at `http://localhost:3000`
 - Ollama API is at `http://localhost:11434`
-- PM2 will restore Flowise automatically after reboot
-- The installer creates `~/.local/bin/open-flowise`
-- The installer creates `~/.local/bin/install-ai-stack`
-- The installer adds `.desktop` files for both launchers when a desktop is available
+- PM2 restores Flowise automatically after restart or login
+- Linux launchers are created under `~/.local/share/applications` and copied to the Desktop when available
 
 ## Notes
 
-- The script is written for Ubuntu or other Debian-based Linux systems that use `systemd`
 - `gemma2:9b` is a fairly large model, so make sure the machine has enough RAM and disk space
+- This installer is Linux-only and expects a `systemd`-based distro
 - If you want to expose Flowise beyond `localhost`, add a reverse proxy and authentication first
