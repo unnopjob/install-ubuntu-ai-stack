@@ -117,7 +117,7 @@ run_with_spinner() {
   while kill -0 "$pid" 2>/dev/null; do
     printf '\r\033[K[%s] %s... %s' "$(date +'%H:%M:%S')" "$display_label" "${spin_chars:spin_index%4:1}" >&2
     sleep 0.1
-    ((spin_index++))
+    ((++spin_index))
   done
 
   if wait "$pid"; then
@@ -317,7 +317,7 @@ wait_for_http() {
         return 0
       fi
       printf '\r\033[K[%s] %s... %s' "$(date +'%H:%M:%S')" "$display_label" "${spin_chars:spin_index%4:1}" >&2
-      ((spin_index++))
+      ((++spin_index))
       sleep 2
     done
     printf '\r\033[K[%s] %s... failed\n' "$(date +'%H:%M:%S')" "$display_label" >&2
