@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/unnopjob/Linux-AI-Stack-Installer/m
 curl -fsSL https://raw.githubusercontent.com/unnopjob/Linux-AI-Stack-Installer/main/install.sh | bash -s -- --open-flowise
 ```
 
-When you run it in a terminal, long steps show a live spinner automatically and the installer tags phases as `[1/8]`, `[2/8]`, and so on.
+When you run it in a terminal, long steps show a live spinner automatically and the installer shows a filling progress bar for the install phases.
 
 ## Extra Commands
 
@@ -82,6 +82,12 @@ If you want to disable the live spinner output:
 
 ```bash
 SPINNER_ENABLED=0 ./install.sh
+```
+
+If you want to change the width of the progress bar:
+
+```bash
+INSTALL_PROGRESS_BAR_WIDTH=30 ./install.sh
 ```
 
 If you mirror the script somewhere else, override the raw URL:

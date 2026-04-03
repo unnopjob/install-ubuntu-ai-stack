@@ -19,6 +19,7 @@ LINUX_FAMILY=""
 SUDO_KEEPALIVE_PID=""
 INSTALL_PROGRESS_TOTAL=0
 INSTALL_PROGRESS_STEP=0
+INSTALL_PROGRESS_BAR_WIDTH="${INSTALL_PROGRESS_BAR_WIDTH:-20}"
 
 log() {
   printf '\n[%s] %s\n' "$(date +'%H:%M:%S')" "$(progress_label "$*")"
@@ -35,12 +36,52 @@ die() {
 
 progress_label() {
   local label="$1"
+  local bar
 
-  if [[ "${INSTALL_PROGRESS_TOTAL}" =~ ^[0-9]+$ && "${INSTALL_PROGRESS_STEP}" =~ ^[0-9]+$ && "${INSTALL_PROGRESS_TOTAL}" -gt 0 && "${INSTALL_PROGRESS_STEP}" -gt 0 ]]; then
-    printf '[%s/%s] %s' "$INSTALL_PROGRESS_STEP" "$INSTALL_PROGRESS_TOTAL" "$label"
+  bar="$(progress_bar)"
+  if [[ -n "$bar" ]]; then
+    printf '%s %s' "$bar" "$label"
   else
     printf '%s' "$label"
   fi
+}
+
+progress_bar() {
+  local total="${INSTALL_PROGRESS_TOTAL:-0}"
+  local step="${INSTALL_PROGRESS_STEP:-0}"
+  local width="${INSTALL_PROGRESS_BAR_WIDTH:-20}"
+  local filled
+  local empty
+  local percent
+  local fill_chars
+  local empty_chars
+
+  if ! [[ "$total" =~ ^[0-9]+$ && "$step" =~ ^[0-9]+$ && "$width" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+
+  if (( total <= 0 || step <= 0 || width <= 0 )); then
+    return 0
+  fi
+
+  if (( step > total )); then
+    step="$total"
+  fi
+
+  filled=$(( step * width / total ))
+  if (( step >= total )); then
+    filled="$width"
+  elif (( filled < 1 )); then
+    filled=1
+  fi
+  empty=$(( width - filled ))
+  percent=$(( step * 100 / total ))
+
+  printf -v fill_chars '%*s' "$filled" ''
+  fill_chars="${fill_chars// /#}"
+  printf -v empty_chars '%*s' "$empty" ''
+  empty_chars="${empty_chars// /-}"
+  printf '[%s%s] %s%%' "$fill_chars" "$empty_chars" "$percent"
 }
 
 spinner_supported() {
@@ -183,6 +224,7 @@ Environment:
   CREATE_DESKTOP_LAUNCHER=${CREATE_DESKTOP_LAUNCHER}
   MIN_FREE_DISK_GB=${MIN_FREE_DISK_GB}
   MIN_RAM_GB_WARN=${MIN_RAM_GB_WARN}
+  INSTALL_PROGRESS_BAR_WIDTH=${INSTALL_PROGRESS_BAR_WIDTH:-20}
   SPINNER_ENABLED=${SPINNER_ENABLED}
 EOF
 }
